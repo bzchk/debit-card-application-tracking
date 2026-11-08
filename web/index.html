@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Учёт заявок на дебетовую карту</title>
+<style>
+:root { color-scheme: light; font-family: system-ui, sans-serif; color: #19281f; background: #f3f5ef; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 1200px; margin: auto; padding: 32px clamp(16px, 5vw, 60px) 48px; }
+header { background: #17382a; color: #fff; border-radius: 24px; padding: clamp(24px, 5vw, 46px); }
+header p { max-width: 58ch; color: #d5e7dc; margin-bottom: 0; }
+.eyebrow { text-transform: uppercase; font-weight: 700; letter-spacing: .13em; font-size: .76rem; color: #ccf18b; }
+h1 { font-size: clamp(2rem, 4.5vw, 3.6rem); line-height: 1.08; letter-spacing: -.045em; margin: 12px 0; }
+h2 { font-size: 1.25rem; margin: 0 0 14px; }
+p { line-height: 1.55; }
+.grid, .stats { display: grid; gap: 16px; margin-top: 20px; }
+.grid { grid-template-columns: 1fr 1fr; align-items: start; }
+.stats { grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); }
+.panel, .stat { background: #fff; padding: 20px; border: 1px solid #dce5d9; border-radius: 16px; min-width: 0; }
+.stat strong { display: block; font-size: 2rem; margin-top: 5px; }
+.stat span, .hint { color: #4b5f52; }
+form { display: grid; gap: 12px; }
+label { display: grid; gap: 5px; font-weight: 600; }
+input, select, button { font: inherit; padding: 10px 12px; border: 1px solid #b8c8ba; border-radius: 8px; }
+input, select { width: 100%; color: inherit; background: #fff; }
+button { cursor: pointer; background: #17382a; color: #fff; font-weight: 650; }
+button.secondary { background: #fff; color: #17382a; }
+button:disabled { opacity: .55; cursor: wait; }
+:focus-visible { outline: 3px solid #418045; outline-offset: 3px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: .91rem; text-align: left; }
+th, td { padding: 9px 8px; border-bottom: 1px solid #e6ede4; }
+th { color: #4b5f52; }
+tbody tr:last-child td { border-bottom: 0; }
+#activity { margin-top: 16px; }
+#notice { margin: 10px 0 0; min-height: 1.5em; }
+#notice[data-error="true"] { color: #a52824; }
+.bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.bar h2 { margin: 0; }
+@media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <span class="eyebrow">Локальный стенд · синтетические данные</span>
+    <h1>Учёт заявок на дебетовую карту</h1>
+    <p>Добавь события и посмотри, как SQL собирает статус заявки и находит нарушения в журнале.</p>
+  </header>
+  <section id="stats" class="stats" aria-label="Количество заявок по статусам"></section>
+  <div class="grid">
+    <section class="panel">
+      <h2>Записать событие</h2>
+      <form id="event-form">
+        <label for="application-id">Номер заявки
+          <input id="application-id" value="A107" required maxlength="24" pattern="[A-Za-z0-9_\-]+" autocomplete="off">
+        </label>
+        <label for="event-type">Тип события
+          <select id="event-type">
+            <option value="form_opened">Форма открыта</option>
+            <option value="application_submitted">Заявка отправлена</option>
+            <option value="card_activated">Карта активирована</option>
+          </select>
+        </label>
+        <button type="submit">Записать в журнал</button>
+      </form>
+      <p class="hint">Повторная отправка с тем же номером заявки создаст новое событие. Повтор доставки по номеру события можно проверить в журнале.</p>
+      <p id="notice" role="status"></p>
+    </section>
+    <section class="panel">
+      <h2>Проверки качества</h2>
+      <div class="table-wrap"><table><thead><tr><th scope="col">Заявка</th><th scope="col">Что найдено</th></tr></thead><tbody id="issues"></tbody></table></div>
+    </section>
+    <section class="panel">
+      <h2>Текущий статус заявок</h2>
+      <div class="table-wrap"><table><thead><tr><th scope="col">Заявка</th><th scope="col">Статус</th></tr></thead><tbody id="applications"></tbody></table></div>
+    </section>
+    <section class="panel">
+      <div class="bar"><h2>Журнал событий</h2><button id="reset" class="secondary">Сбросить пример</button></div>
+      <div class="table-wrap"><table><thead><tr><th scope="col">Событие</th><th scope="col">Заявка</th><th scope="col">Тип</th><th scope="col">Время UTC</th><th scope="col">Действие</th></tr></thead><tbody id="events"></tbody></table></div>
+    </section>
+  </div>
+</main>
+<script>
+const statuses = {
+  form_opened: 'Форма открыта',
+  application_submitted: 'Заявка отправлена',
+  card_activated: 'Карта активирована'
+};
+const issues = {
+  repeated_submission: 'Повторная отправка',
+  activation_without_submission: 'Активация без отправки',
+  activation_before_submission: 'Активация раньше отправки',
+  missing_form_open: 'Нет события открытия формы',
+  submission_before_form_open: 'Отправка раньше открытия формы'
+};
+const get = id => document.getElementById(id);
+const notice = get('notice');
+let busy = false;
+
+function fillRows(id, values, columns) {
+  const body = get(id);
+  body.replaceChildren();
+  if (!values.length) {
+    const cell = body.insertRow().insertCell();
+    cell.colSpan = columns;
+    cell.textContent = 'Пока пусто';
+  }
+  for (const valuesForRow of values) {
+    const row = body.insertRow();
+    for (const value of valuesForRow) {
+      const cell = row.insertCell();
+      if (value instanceof Node) cell.append(value);
+      else cell.textContent = value;
+    }
+  }
+}
+
+function render(state) {
+  const counts = Object.fromEntries(state.counts.map(row => [row.status, row.count]));
+  get('stats').replaceChildren(...Object.entries(statuses).map(([status, title]) => {
+    const card = document.createElement('div');
+    card.className = 'stat';
+    const label = document.createElement('span');
+    label.textContent = title;
+    const count = document.createElement('strong');
+    count.textContent = counts[status] ?? 0;
+    card.append(label, count);
+    return card;
+  }));
+  fillRows('issues', state.issues.map(row => [row.application_id, issues[row.issue]]), 2);
+  fillRows('applications', state.applications.map(row => [row.application_id, statuses[row.status]]), 2);
+  fillRows('events', state.events.map(row => {
+    const button = document.createElement('button');
+    button.className = 'secondary';
+    button.textContent = 'Повторить';
+    button.setAttribute('aria-label', 'Повторить доставку события ' + row.event_id);
+    button.addEventListener('click', () => request('/api/events', {event_id: row.event_id}));
+    return ['#' + row.event_id, row.application_id, statuses[row.event_type], row.occurred_at.slice(0, 19), button];
+  }), 5);
+}
+
+async function request(path, payload) {
+  if (busy) return;
+  busy = true;
+  document.querySelectorAll('button').forEach(button => button.disabled = true);
+  try {
+    const options = payload === undefined ? {} : {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    };
+    const response = await fetch(path, options);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Ошибка сервера.');
+    render(data);
+    notice.textContent = data.message ?? '';
+    notice.dataset.error = 'false';
+  } catch (error) {
+    notice.textContent = error.message;
+    notice.dataset.error = 'true';
+  } finally {
+    busy = false;
+    document.querySelectorAll('button').forEach(button => button.disabled = false);
+  }
+}
+
+get('event-form').addEventListener('submit', event => {
+  event.preventDefault();
+  request('/api/events', {
+    application_id: get('application-id').value.trim(),
+    event_type: get('event-type').value
+  });
+});
+get('reset').addEventListener('click', () => request('/api/reset', {}));
+request('/api/state');
+</script>
+</body>
+</html>
